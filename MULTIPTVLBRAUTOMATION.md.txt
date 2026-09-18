@@ -1,0 +1,424 @@
+import os
+import time
+import re
+import shutil
+import traceback
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+
+# ==========================================
+# --- CONFIGURATION / REQUIRED INPUTS ---
+# ==========================================
+DOWNLOAD_DIR = os.path.join(os.environ.get('USERPROFILE', 'C:\\'), 'Downloads')
+BASE_SAVE_DIR_ROOT = r"C:\Users\ADIVYA2\OneDrive - azureford\Documents\Backup\FORD\to copy_14.7.21\PMST handover_april 2021\T6 2020\PDL reviews and CRF edits\BR\multi PTVL BRs"  
+
+TARGET_VIEW = "Engineering"
+FEATURE_CODES = "AAG,ICF,IEV,HJG,ICE,ICD,ICP,ICH,IDB,HKC,HKS,IEP,IEL,IBM,CA#,SE#,EN-,SUP,HLQ,GTD,GTC,DR-,TR-,GTE,CP8,B5W,IEX,HNT,HCA,J4W,J3K,DAX,HNK,AC-,DBC,EGK,EGJ,AAC,FEA,AAQ,A63,C1C,HNA,HJH,HLN,BSG,ABW,DEE,HNS,HLK,GBV,HSA,DGA,AGA,HLF,JBB,AGA,YZK,A2E,ABX"
+BASE_URL = "https://www.pdo.ford.com/PdoRuleAuthoringWeb/jsf/reports/buildabilityMultiPtvlReport.faces?dswid=-1104"
+
+# --- List of PTVLs and their corresponding MYs to loop through ---
+TARGET_PTVLS_LIST = [
+    ("TRA", "2026"),
+    ("TRB", "2026"),
+    ("TRC", "2026"),
+    ("TEK", "2026"),
+    ("TRD", "2026"),
+    ("TRD", "2027"),
+    ("TRD", "2028"),
+    ("TRE", "2027")
+]
+
+# ==========================================
+# --- EXACT HTML LOCATORS ---
+# ==========================================
+XPATHS = {
+    "REPORTS_DROPDOWN_MENU": '//*[@id="frm:j_id_41"]/ul/li[4]/a/span[1] | //span[normalize-space(text())="Reports"]',
+    "MULTI_PTVL_REPORT_LINK": '//*[@id="frm:multiPTVLBuildabilityReport"]',
+
+    "VIEW_DROPDOWN": '//*[@id="buildabilityMultiReportForm:pdlVehicleListInput"]',
+    "PTVL_SEARCH_BOX": '//*[@id="buildabilityMultiReportForm:ptvlSearchInput"]//input | //input[contains(@id, "ptvlSearchInput")] | //*[@id="buildabilityMultiReportForm:ptvlSearchInput"]',
+    "PTVL_SEARCH_BTN": '//*[@id="buildabilityMultiReportForm:searchButton"]',
+    
+    "ADD_BTN_1": '//*[@id="buildabilityMultiReportForm:addBtn"]',
+    
+    "HEADER_CHECKBOX": '//*[@id="buildabilityMultiReportForm:addededPtvlTable"]//th//div[contains(@class, "ui-chkbox-box")]',
+    "POPULATE_FAMILIES_BTN": '//*[@id="buildabilityMultiReportForm:populateFamilies"]',
+    "FAMILIES_INPUT_BOX": '//*[@id="buildabilityMultiReportForm:templateTab:searchText"]//input | //input[contains(@id, "searchText")] | //*[@id="buildabilityMultiReportForm:templateTab:searchText"]',
+    
+    "SEARCH_BY_CODE_BTN": "//*[normalize-space(text())='Search by Code' or @value='Search by Code']", 
+    "SELECT_ALL_LEFT": "(//a[normalize-space(text())='All'])[1]",   
+    "ADD_BTN_2": '//*[@id="buildabilityMultiReportForm:templateTab:addButton"]/span[1] | //*[@id="buildabilityMultiReportForm:templateTab:addButton"]',
+    "SELECT_ALL_RIGHT": "(//a[normalize-space(text())='All'])[2]",  
+    "SUBMIT_BTN": "//*[normalize-space(text())='Submit' or @value='Submit']",
+    "REPORTS_MENU": "//span[contains(text(), 'Reports') or contains(., 'Reports')]"
+}
+
+# ==========================================
+# --- HELPER FUNCTIONS ---
+# ==========================================
+def wait_for_loading_to_finish(driver, timeout=30): 
+    try: 
+        WebDriverWait(driver, 1.5).until(EC.presence_of_element_located((By.ID, "loading-overlay-id"))) 
+        WebDriverWait(driver, timeout).until(EC.invisibility_of_element_located((By.ID, "loading-overlay-id"))) 
+    except TimeoutException: 
+        pass
+
+def get_visible_elements(driver, xpath, timeout=10): 
+    try: 
+        WebDriverWait(driver, timeout).until(EC.presence_of_element_located((By.XPATH, xpath))) 
+        elements = driver.find_elements(By.XPATH, xpath) 
+        return [el for el in elements if el.is_displayed()] 
+    except TimeoutException: 
+        return []
+
+def click_visible_element(driver, xpath, timeout=30): 
+    end_time = time.time() + timeout 
+    while time.time() < end_time: 
+        try: 
+            visible_elements = get_visible_elements(driver, xpath) 
+            if not visible_elements: 
+                time.sleep(1) 
+                continue
+            el = visible_elements[0]
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+            time.sleep(0.5)
+            try:
+                el.click()
+            except:
+                driver.execute_script("arguments[0].click();", el)
+            return 
+        except StaleElementReferenceException:
+            time.sleep(0.5)
+    raise Exception(f"Failed to click visible element for xpath: {xpath}")
+
+def type_in_visible_input(driver, xpath, text, timeout=30): 
+    end_time = time.time() + timeout 
+    while time.time() < end_time: 
+        try: 
+            visible_elements = get_visible_elements(driver, xpath) 
+            if not visible_elements: 
+                time.sleep(1) 
+                continue
+            
+            el = visible_elements[0]
+            
+            if el.tag_name.lower() not in ['input', 'textarea']:
+                inputs = el.find_elements(By.XPATH, ".//input | .//textarea")
+                if inputs:
+                    el = inputs[0]
+            
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+            time.sleep(0.5)
+            
+            try:
+                el.clear()
+            except:
+                driver.execute_script("arguments[0].value = '';", el)
+                
+            try:
+                el.send_keys(text)
+            except:
+                driver.execute_script("arguments[0].value = arguments[1];", el, text)
+                
+            return 
+        except StaleElementReferenceException:
+            time.sleep(0.5)
+    raise Exception(f"Failed to type in visible input for xpath: {xpath}")
+
+# ==========================================
+# --- MAIN SCRIPT ---
+# ==========================================
+def run_automation(): 
+    os.makedirs(BASE_SAVE_DIR_ROOT, exist_ok=True)
+
+    options = webdriver.EdgeOptions()
+    prefs = {
+        "download.default_directory": DOWNLOAD_DIR,
+        "profile.default_content_setting_values.automatic_downloads": 1,
+        "download.prompt_for_download": False
+    }
+    options.add_experimental_option("prefs", prefs)
+    options.add_argument("--log-level=3")
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    options.add_experimental_option("detach", True) 
+
+    print("Starting Microsoft Edge browser...")
+    driver = webdriver.Edge(options=options)
+    driver.maximize_window()
+
+    wait = WebDriverWait(driver, 30)
+    sso_wait = WebDriverWait(driver, 120) 
+
+    try:
+        print("Step 1: Navigating to Base URL...")
+        driver.get(BASE_URL)
+        sso_wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        print(" -> Page body loaded. Waiting 3 seconds for scripts...")
+        time.sleep(3) 
+
+        print("Step 1.1: Clicking Reports dropdown menu...")
+        wait_for_loading_to_finish(driver)
+        
+        try:
+            reports_menu = wait.until(EC.presence_of_element_located((By.XPATH, XPATHS["REPORTS_DROPDOWN_MENU"])))
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", reports_menu)
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", reports_menu)
+            print(" -> Click executed. Waiting 2 seconds for dropdown animation...")
+            time.sleep(2)
+        except Exception as e:
+            print(f" -> Warning on 1.1: {e}")
+
+        print("Step 1.2: Clicking Buildability Report - Multi PTVL...")
+        try:
+            multi_link = wait.until(EC.presence_of_element_located((By.XPATH, XPATHS["MULTI_PTVL_REPORT_LINK"])))
+            driver.execute_script("arguments[0].click();", multi_link)
+        except TimeoutException:
+            print(" -> Submenu item not found! Retrying Reports menu click...")
+            driver.execute_script("arguments[0].click();", reports_menu)
+            time.sleep(2)
+            multi_link = wait.until(EC.presence_of_element_located((By.XPATH, XPATHS["MULTI_PTVL_REPORT_LINK"])))
+            driver.execute_script("arguments[0].click();", multi_link)
+            
+        print(" -> Submenu clicked. Waiting for next page to load...")
+        wait_for_loading_to_finish(driver)
+        time.sleep(3)
+
+        print("Step 2: Selecting View: Engineering...")
+        click_visible_element(driver, XPATHS["VIEW_DROPDOWN"])
+        time.sleep(1)
+        click_visible_element(driver, f"//option[contains(text(), '{TARGET_VIEW}')] | //li[contains(text(), '{TARGET_VIEW}')]")
+        
+        try:
+            driver.execute_script("document.body.click();")
+        except:
+            pass
+        wait_for_loading_to_finish(driver)
+
+        # =========================================================
+        # --- LOGIC 1: Loop through Standard PTVLs ---
+        # =========================================================
+        for row_index, (current_ptvl, current_my) in enumerate(TARGET_PTVLS_LIST):
+            print(f"\n--- Processing PTVL: {current_ptvl} for MY: {current_my} (Row Index: {row_index}) ---")
+            
+            print(f"  Step 3: Searching for PTVL: {current_ptvl}...")
+            type_in_visible_input(driver, XPATHS["PTVL_SEARCH_BOX"], current_ptvl)
+            
+            print("  Step 4: Clicking Search button...")
+            click_visible_element(driver, XPATHS["PTVL_SEARCH_BTN"])
+            wait_for_loading_to_finish(driver)
+
+            print(f"  Step 5: Selecting checkbox for MY {current_my} in Applicable PTVL/MY table...")
+            my_checkbox_xpath = f"//tr[td[contains(normalize-space(text()), '{current_my}')]]//div[contains(@class, 'ui-chkbox-box')]"
+            click_visible_element(driver, my_checkbox_xpath)
+
+            print("  Step 6: Clicking Add button...")
+            click_visible_element(driver, XPATHS["ADD_BTN_1"])
+            wait_for_loading_to_finish(driver)
+
+            # Creating dynamic XPaths based on the current row index in the Selected table
+            start_tp_xpath = f'//*[@id="buildabilityMultiReportForm:addededPtvlTable:{row_index}:addedPtvlBeginTpRow"]'
+            end_tp_xpath = f'//*[@id="buildabilityMultiReportForm:addededPtvlTable:{row_index}:addedPtvlEndTpRow"]'
+
+            print("  Step 7: Selecting top most option for Start TP...")
+            start_tp = get_visible_elements(driver, start_tp_xpath)[0]
+            try:
+                Select(start_tp).select_by_index(1) 
+            except:
+                click_visible_element(driver, start_tp_xpath)
+                time.sleep(1)
+                driver.execute_script("arguments[0].click();", start_tp.find_elements(By.XPATH, ".//option | .//li")[1])
+            wait_for_loading_to_finish(driver)
+
+            print("  Step 8: Selecting bottom most option for End TP...")
+            end_tp = get_visible_elements(driver, end_tp_xpath)[0]
+            try:
+                opts = Select(end_tp).options
+                Select(end_tp).select_by_index(len(opts)-1)
+            except:
+                click_visible_element(driver, end_tp_xpath)
+                time.sleep(1)
+                options_list = end_tp.find_elements(By.XPATH, ".//option | .//li")
+                driver.execute_script("arguments[0].click();", options_list[-1])
+            wait_for_loading_to_finish(driver)
+
+        print("\n--- Finished adding all PTVLs ---")
+        # =========================================================
+
+        print("Step 9: Clicking Select All checkbox in right table header...")
+        click_visible_element(driver, XPATHS["HEADER_CHECKBOX"])
+
+        print("Step 10: Clicking Populate Families...")
+        click_visible_element(driver, XPATHS["POPULATE_FAMILIES_BTN"])
+        wait_for_loading_to_finish(driver)
+
+        print("Step 11: Typing feature codes...")
+        type_in_visible_input(driver, XPATHS["FAMILIES_INPUT_BOX"], FEATURE_CODES)
+        wait_for_loading_to_finish(driver)
+
+        print("Step 12: Clicking Search by Code...")
+        click_visible_element(driver, XPATHS["SEARCH_BY_CODE_BTN"])
+        wait_for_loading_to_finish(driver)
+
+        print("Step 13: Clicking Select All (left panel) and Add...")
+        click_visible_element(driver, XPATHS["SELECT_ALL_LEFT"])
+        time.sleep(1)
+        
+        click_visible_element(driver, XPATHS["ADD_BTN_2"])
+        wait_for_loading_to_finish(driver)
+
+        print("Step 14: Clicking Select All (right panel) and Submit...")
+        click_visible_element(driver, XPATHS["SELECT_ALL_RIGHT"])
+        time.sleep(1)
+        click_visible_element(driver, XPATHS["SUBMIT_BTN"])
+        wait_for_loading_to_finish(driver)
+
+        # =========================================================
+        # Validate Success Banner
+        # =========================================================
+        print("Step 14.5: Validating success banner...")
+        banner_found = False
+        timeout_end = time.time() + 60  
+        
+        while time.time() < timeout_end:
+            try:
+                body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+                if "submitted successfully" in body_text:
+                    banner_found = True
+                    break
+            except StaleElementReferenceException:
+                pass
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        if banner_found:
+            print(" -> [✔] Success! Report successfully queued.")
+        else:
+            error_details = "Success banner 'submitted successfully' did not appear within 60 seconds."
+            try:
+                error_xpath = "//*[contains(@class, 'ui-messages-error') or contains(@class, 'ui-message-error-detail') or contains(@class, 'ui-growl-message')]"
+                err_elements = driver.find_elements(By.XPATH, error_xpath)
+                visible_errs = [el.text.strip() for el in err_elements if el.is_displayed() and el.text.strip()]
+                if visible_errs:
+                    error_details = " | ".join(visible_errs)
+            except:
+                pass
+            raise Exception(f"Validation Failed: {error_details}")
+
+        print("Step 15: Navigating to Report Retrieval...")
+        reports_menu = wait.until(EC.presence_of_element_located((By.XPATH, XPATHS["REPORTS_MENU"])))
+        ActionChains(driver).move_to_element(reports_menu).perform()
+        time.sleep(1)
+        driver.execute_script("arguments[0].click();", reports_menu)
+        time.sleep(1.5)
+        
+        retrieval_xpath = "//a[contains(@class, 'ui-menuitem-link') and contains(., 'Report Retrieval')]"
+        retrieval_link = wait.until(EC.presence_of_element_located((By.XPATH, retrieval_xpath)))
+        driver.execute_script("arguments[0].click();", retrieval_link)
+        wait_for_loading_to_finish(driver)
+        time.sleep(3)
+
+        print("Step 16: Waiting for report to generate and downloading...")
+        report_ready = False
+        download_link = None
+        
+        for attempt in range(60): 
+            wait_for_loading_to_finish(driver)
+            try:
+                xpath_text = "//*[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'view') or contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'download')]"
+                visible_elements = [el for el in driver.find_elements(By.XPATH, xpath_text) if el.is_displayed() and el.tag_name.lower() not in ['body', 'html', 'tr', 'td', 'tbody', 'table', 'th', 'thead']]
+                
+                if visible_elements:
+                    target_element = visible_elements[0] 
+                    parent = target_element.find_element(By.XPATH, "..")
+                    
+                    tag = target_element.tag_name.lower()
+                    parent_tag = parent.tag_name.lower()
+                    
+                    is_active = False
+                    element_to_click = target_element
+                    
+                    if tag in ["a", "button"]: is_active = True
+                    elif parent_tag in ["a", "button"]:
+                        is_active = True
+                        element_to_click = parent
+                        
+                    if is_active and "disabled" not in (element_to_click.get_attribute("class") or "").lower():
+                        download_link = element_to_click
+                        report_ready = True
+                            
+            except StaleElementReferenceException:
+                pass 
+                
+            if report_ready and download_link:
+                break 
+                
+            print(f" -> Refreshing view... (Attempt {attempt+1}/60)")
+            try:
+                refresh_btns = driver.find_elements(By.XPATH, "//*[normalize-space(text())='Refresh' or @value='Refresh']")
+                visible_refresh = [btn for btn in refresh_btns if btn.is_displayed()]
+                if visible_refresh:
+                    driver.execute_script("arguments[0].click();", visible_refresh[0])
+                else:
+                    driver.refresh()
+            except Exception:
+                driver.refresh()
+            
+            wait_for_loading_to_finish(driver)
+            time.sleep(2)
+            
+        if report_ready and download_link:
+            print(" -> Link is active. Downloading...")
+            
+            before_downloads = set(os.listdir(DOWNLOAD_DIR))
+            
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", download_link)
+            driver.execute_script("arguments[0].click();", download_link)
+            
+            print(" -> Waiting for file download to complete...")
+            new_file = None
+            timeout = time.time() + 60 
+            while time.time() < timeout:
+                current_downloads = set(os.listdir(DOWNLOAD_DIR))
+                new_files = current_downloads - before_downloads
+                if new_files:
+                    potential_file = list(new_files)[0]
+                    if not potential_file.endswith('.crdownload') and not potential_file.endswith('.tmp'):
+                        new_file = potential_file
+                        break
+                time.sleep(1)
+
+            if new_file:
+                source_path = os.path.join(DOWNLOAD_DIR, new_file)
+                
+                # --- Format new file name: multiPTVLBR_DD-MM-YY ---
+                file_extension = os.path.splitext(new_file)[1]
+                date_str = datetime.now().strftime("%d-%m-%y")
+                new_filename = f"multiPTVLBR_{date_str}{file_extension}"
+                
+                final_path = os.path.join(BASE_SAVE_DIR_ROOT, new_filename)
+                
+                if os.path.exists(final_path):
+                    os.remove(final_path)
+                shutil.move(source_path, final_path)
+                print(f"Download complete! File saved to: {final_path}")
+            else:
+                print("Download timed out.")
+        else:
+            print("Report generation timed out.")
+
+    except Exception as e:
+        print(f"[!] ERROR: {str(e)}")
+        traceback.print_exc()
+    finally:
+        print("Script execution finished. Browser will remain open.")
+
+if __name__ == '__main__':
+    run_automation()
