@@ -1,0 +1,404 @@
+import os
+import time
+import traceback
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+
+URL = "https://www.pdo.ford.com/PdoRuleAuthoringWeb/jsf/ruleChecker/ruleCheckerSearch.faces?dswid=-1104"
+MODIFIED_BY_USER = "adivya2"
+
+RULE_IDS_LIST = [
+"36096",
+"56826",
+"29297"
+]
+
+REPORT_SAVE_DIR = r"C:\Users\ADIVYA2\OneDrive - azureford\Desktop\python\rule publish automation"
+
+LOC_LOADING_OVERLAY = (By.ID, "loading-overlay-id")
+LOC_MODIFIED_BY_BOX = (By.ID, "ruleCheckerSearchForm:modifiedBy")
+LOC_SEARCH_BUTTON   = (By.XPATH, '//*[@id="ruleCheckerSearchForm:SearchRuleButton"]/span')
+LOC_GOLDEN_CELL     = (By.XPATH, '//*[@id="ruleCheckertSearchRulesResults"]/tbody/tr[1]/td[2]/div/div/div/table/tbody/tr/td[1]/table/tbody/tr[3]/td[10]')
+
+def wait_for_loading_to_finish(driver, timeout=60):
+    try:
+        time.sleep(1.5)
+        WebDriverWait(driver, 3).until(EC.presence_of_element_located(LOC_LOADING_OVERLAY))
+        WebDriverWait(driver, timeout).until(EC.invisibility_of_element_located(LOC_LOADING_OVERLAY))
+    except TimeoutException:
+        pass
+
+def run_rule_editor_automation():
+    options = webdriver.EdgeOptions()
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-web-security")
+    options.add_argument("--allow-running-insecure-content")
+    options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+    print("Starting Microsoft Edge browser...")
+    driver = webdriver.Edge(options=options)
+    driver.maximize_window()
+
+    wait = WebDriverWait(driver, 30)
+    sso_wait = WebDriverWait(driver, 120)
+
+    failed_rules = {}
+
+    try:
+        print("Step 1: Opening URL...")
+        driver.get(URL)
+
+        print("Waiting up to 2 minutes for Microsoft SSO Login...")
+        sso_wait.until(EC.presence_of_element_located(LOC_MODIFIED_BY_BOX))
+        print("SSO Login successful!")
+        wait_for_loading_to_finish(driver)
+
+        for index, rule_id in enumerate(RULE_IDS_LIST, 1):
+            print(f"\n=======================================================")
+            print(f"▶ PROCESSING RULE {index}/{len(RULE_IDS_LIST)}: {rule_id}")
+            print(f"=======================================================")
+
+            current_step = "Initialization"
+            try:
+                current_step = "Step 2: Resetting Search Page"
+                print(f"  -> {current_step}...")
+
+                driver.get(URL)
+                time.sleep(2)
+
+                driver.refresh()
+                try:
+                    WebDriverWait(driver, 2).until(EC.alert_is_present())
+                    driver.switch_to.alert.accept()
+                except:
+                    pass
+
+                wait_for_loading_to_finish(driver)
+                time.sleep(2)
+
+                for attempt in range(4):
+                    try:
+                        modified_by = wait.until(EC.element_to_be_clickable(LOC_MODIFIED_BY_BOX))
+
+                        modified_by.send_keys(Keys.CONTROL, 'a')
+                        modified_by.send_keys(Keys.BACKSPACE)
+                        time.sleep(0.5)
+                        modified_by.send_keys(MODIFIED_BY_USER)
+                        time.sleep(1)
+
+                        current_val = modified_by.get_attribute("value")
+                        if not current_val or current_val.strip() == "":
+                            print("     [!] Website cleared the text box. Retrying input...")
+                            continue
+
+                        search_btn = wait.until(EC.element_to_be_clickable(LOC_SEARCH_BUTTON))
+                        driver.execute_script("arguments[0].click();", search_btn)
+                        break
+                    except StaleElementReferenceException:
+                        print(f"     [!] Page reloaded dynamically. Retrying text entry (Attempt {attempt+1}/4)...")
+                        time.sleep(1.5)
+                else:
+                    raise Exception("Failed to lock in User ID. The website repeatedly cleared the input box.")
+
+                print("     Waiting for the main enterprise table to download...")
+                wait_for_loading_to_finish(driver, timeout=60)
+                time.sleep(4)
+
+                print("     Zooming out browser to expose elements...")
+                driver.execute_script("document.body.style.zoom='50%'")
+                time.sleep(2)
+
+                current_step = "Step 3: Finding Rule ID cell via Golden XPath"
+                print(f"  -> {current_step}...")
+
+                driver.execute_script("if(document.activeElement){document.activeElement.blur();}")
+
+                for cell_attempt in range(3):
+                    try:
+                        golden_cell = WebDriverWait(driver, 60).until(EC.element_to_be_clickable(LOC_GOLDEN_CELL))
+
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'center'});", golden_cell)
+                        driver.execute_script("arguments[0].style.border='4px solid red';", golden_cell)
+                        time.sleep(2)
+
+                        print(f"     [+] Clicking the cell natively to activate keyboard focus (Attempt {cell_attempt+1})...")
+                        try:
+                            ActionChains(driver).move_to_element(golden_cell).click().perform()
+                        except Exception:
+                            golden_cell.click()
+
+                        time.sleep(1.5)
+
+                        print(f"     [+] Typing Rule ID '{rule_id}'...")
+
+                        active_el = driver.switch_to.active_element
+
+                        if active_el and active_el.tag_name.lower() in ['input', 'textarea']:
+                            active_el.clear()
+                            active_el.send_keys(rule_id)
+                            active_el.send_keys(Keys.ENTER)
+                        else:
+                            actions = ActionChains(driver)
+                            for _ in range(15):
+                                actions.send_keys(Keys.BACKSPACE)
+                            actions.send_keys(rule_id)
+                            actions.send_keys(Keys.ENTER)
+                            actions.perform()
+
+                        break
+                    except StaleElementReferenceException:
+                        print("     [!] The enterprise table updated in the background. Retrying Golden Cell click...")
+                        time.sleep(3)
+                else:
+                    raise Exception("Could not interact with Golden Cell. It continuously went stale.")
+
+                wait_for_loading_to_finish(driver)
+                time.sleep(4)
+
+                current_step = "Step 3.5: Safety Verification (Ensuring rule filtered properly)"
+                print(f"  -> {current_step}...")
+
+                try:
+                    validation_xpath = f"//tbody//td[contains(normalize-space(.), '{rule_id}')]"
+                    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, validation_xpath)))
+                    print(f"     [+] Verification Passed: Rule '{rule_id}' is visible in the results.")
+                except TimeoutException:
+                    raise Exception(f"CRITICAL SAFETY ABORT: Rule ID '{rule_id}' did not appear in the filtered results. Aborting to prevent bulk selection.")
+
+                current_step = "Step 3.6: Checking Rule Status"
+                print(f"  -> {current_step}...")
+                
+                try:
+                    time.sleep(1.5)
+                    row_xpath = f"//tbody//tr[.//td[contains(normalize-space(.), '{rule_id}')]]"
+                    rule_rows = driver.find_elements(By.XPATH, row_xpath)
+                    
+                    is_published = False
+                    for row in rule_rows:
+                        try:
+                            cells = row.find_elements(By.TAG_NAME, "td")
+                            for cell in cells:
+                                cell_text = str(cell.get_attribute("textContent") or "").strip().upper()
+                                if cell_text == "PUBLISHED":
+                                    is_published = True
+                                    break
+                        except StaleElementReferenceException:
+                            pass
+                        
+                        if is_published:
+                            break
+                            
+                    if is_published:
+                        print("     [i] skipping as the rule is already published")
+                        continue
+                except Exception:
+                    pass
+
+                current_step = "Step 4: Locating and Clicking Data Row Radio Button"
+                print(f"  -> {current_step}...")
+
+                try:
+                    selection_xpath = "(//u[contains(@class, 'COPanelImage')])[1]"
+
+                    target_element = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.XPATH, selection_xpath)))
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_element)
+                    time.sleep(1)
+
+                    try:
+                        target_element.click()
+                    except:
+                        driver.execute_script("arguments[0].click();", target_element)
+
+                    print(f"     [+] Successfully clicked selection box using imported logic: {selection_xpath}")
+
+                except Exception as e:
+                    raise Exception(f"CRITICAL SAFETY ABORT: Could not find or click the selection box via '{selection_xpath}'. Error: {str(e)}")
+
+                wait_for_loading_to_finish(driver)
+                time.sleep(2.5)
+
+                current_step = "Step 5: Locating and Clicking Publish Arrow Image"
+                print(f"  -> {current_step}...")
+
+                publish_icon_xpaths = [
+                    "//img[contains(translate(@src, 'PUBLISH', 'publish'), 'publish') or contains(translate(@title, 'PUBLISH', 'publish'), 'publish')]",
+                    "//*[translate(normalize-space(text()), 'PUBLISH', 'publish')='publish']/parent::*//img",
+                    "//*[translate(normalize-space(text()), 'PUBLISH', 'publish')='publish']/parent::*//*[contains(@class, 'icon')]",
+                    "//*[translate(normalize-space(text()), 'PUBLISH', 'publish')='publish']/parent::a",
+                    "//*[translate(normalize-space(text()), 'PUBLISH', 'publish')='publish']/parent::button"
+                ]
+
+                publish_clicked = False
+                for xpath in publish_icon_xpaths:
+                    elements = driver.find_elements(By.XPATH, xpath)
+                    visible_elements = [el for el in elements if el.is_displayed()]
+
+                    if visible_elements:
+                        target_arrow = visible_elements[0]
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_arrow)
+                        time.sleep(0.5)
+                        driver.execute_script("window.scrollBy(0, -100);")
+                        driver.execute_script("arguments[0].style.border='4px solid green';", target_arrow)
+
+                        try:
+                            ActionChains(driver).move_to_element(target_arrow).click().perform()
+                        except:
+                            try:
+                                target_arrow.click()
+                            except:
+                                driver.execute_script("""
+                                    var el = arguments[0];
+                                    if (el.tagName.toLowerCase() === 'img' && el.parentElement) {
+                                        el.parentElement.click();
+                                    } else {
+                                        el.click();
+                                    }
+                                """, target_arrow)
+
+                        print(f"     [+] Found Publish Arrow/Icon! Clicked via: {xpath}")
+                        publish_clicked = True
+                        break
+
+                if not publish_clicked:
+                    raise Exception("Could not find the clickable Publish Arrow/Icon. Check if it loaded on the screen.")
+
+                wait_for_loading_to_finish(driver)
+                time.sleep(2)
+
+                current_step = "Step 6: Confirming 'Yes, publish the rules' in warning pop up"
+                print(f"  -> {current_step}...")
+
+                possible_yes_locators = [
+                    "//div[contains(@class, 'ui-dialog') or contains(@role, 'dialog')]//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'yes')]",
+                    "//div[contains(@class, 'ui-dialog')]//span[contains(translate(text(), 'YES', 'yes'), 'yes')]/parent::button",
+                    "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'yes, publish')]"
+                ]
+
+                yes_clicked = False
+
+                for wait_attempt in range(15):
+                    for xpath in possible_yes_locators:
+                        elements = driver.find_elements(By.XPATH, xpath)
+                        visible_elements = [el for el in elements if el.is_displayed()]
+
+                        if visible_elements:
+                            target_yes = visible_elements[-1]
+
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_yes)
+                            time.sleep(0.5)
+                            driver.execute_script("arguments[0].style.border='4px solid blue';", target_yes)
+
+                            try:
+                                target_yes.click()
+                            except:
+                                driver.execute_script("arguments[0].click();", target_yes)
+
+                            yes_clicked = True
+                            print("     [+] Found visible Confirmation popup button! Clicking it...")
+                            break
+
+                    if yes_clicked:
+                        break
+
+                    time.sleep(1)
+
+                if not yes_clicked:
+                    raise Exception("The Confirmation Popup never appeared, or the 'Yes' button was not visible. Publish action failed.")
+
+                wait_for_loading_to_finish(driver, timeout=60)
+
+                current_step = "Step 7: Verifying publish success and checking for error banners"
+                print(f"  -> {current_step}...")
+
+                permission_denied = False
+                for _ in range(5):
+                    try:
+                        body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+                        if "not authorized to publish" in body_text or "permission to publish" in body_text or "dont have permission" in body_text:
+                            permission_denied = True
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+
+                if permission_denied:
+                    raise Exception("Publish permission denied. Error banner detected on screen.")
+
+                print(f"     [✔] Successfully published Rule ID: {rule_id}")
+
+            except Exception as e:
+                e_type = type(e).__name__
+                e_msg = str(e).split('\n')[0]
+
+                if "TimeoutException" in e_type:
+                    error_msg = f"Timed out waiting at {current_step}. Check locators or wait times."
+                else:
+                    error_msg = f"Failed at {current_step} - {e_msg}"
+
+                print(f"  [!] ERROR processing {rule_id}: {error_msg}")
+                traceback.print_exc()
+
+                failed_rules[rule_id] = error_msg
+
+                try:
+                    webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    time.sleep(0.5)
+                    driver.execute_script("document.querySelectorAll('.ui-dialog-content').forEach(el => el.parentElement.style.display='none');")
+                    driver.execute_script("document.querySelectorAll('.ui-widget-overlay').forEach(el => el.style.display='none');")
+                except:
+                    pass
+                wait_for_loading_to_finish(driver)
+
+        print("\n=======================================================")
+        print("ALL PROCESSES COMPLETED!")
+        print("=======================================================")
+
+        if failed_rules:
+            print("\n⚠️  FAILED RULE IDs (Not Executed Successfully):")
+
+            file_content = "FAILED RULE IDs REPORT\n"
+            file_content += "="*60 + "\n\n"
+            file_content += f"Run Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+            for rule, reason in failed_rules.items():
+                line = f"   - Rule ID: {rule} | Reason: {reason}"
+                print(line)
+                file_content += line + "\n\n"
+
+            try:
+                os.makedirs(REPORT_SAVE_DIR, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                file_path = os.path.join(REPORT_SAVE_DIR, f"Failed_Rules_Report_{timestamp}.txt")
+
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(file_content)
+
+                print(f"\n[i] A copy of this failure report has been saved to:\n    {file_path}")
+            except Exception as file_error:
+                print(f"\n[!] Warning: Could not save the text file to the designated directory. Error: {file_error}")
+
+        else:
+            print("\n✅  SUCCESS: All Rule IDs were published successfully! No failure report needed.")
+
+        print("=======================================================\n")
+
+    except Exception as e:
+        print(f"\n[!] CRITICAL SYSTEM ERROR: {str(e)}")
+
+    finally:
+        try:
+            driver.execute_script("document.body.style.zoom='100%'")
+        except:
+            pass
+
+        print("Closing browser in 5 seconds...")
+        time.sleep(5)
+        driver.quit()
+
+if __name__ == '__main__':
+    run_rule_editor_automation()
